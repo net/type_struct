@@ -19,5 +19,8 @@ erl_crash.dump
 # Also ignore archive artifacts (built via "mix archive.build").
 *.ez
 
+# Ignore Hex package artifacts.
+type_struct-*.tar
+
 # macOS
 .DS_Store

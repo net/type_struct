@@ -1,57 +1,52 @@
 defmodule TypeStruct do
   @moduledoc ~S"""
-  TypeStruct provides a concise syntax for defining structs and their types.
+  Defines structs and their types together.
+
+  TypeStruct extends `defstruct` so fields can be declared as `name: type`,
+  with optional defaults written as `type \\ default`:
+
+      defmodule Point do
+        use TypeStruct
+
+        defstruct x: integer,
+                  y: integer
+      end
+
+  It can also define nested struct modules:
+
+      defmodule Accounts do
+        use TypeStruct
+
+        defstruct User,
+                  id: integer,
+                  name: String.t() \\ "",
+                  eye_color: :black | :blue | :brown | :green
+
+        defstruct Group,
+                  id: integer,
+                  name: String.t(),
+                  users: [User.t()] \\ []
+      end
+
+  Fields without defaults are required through `@enforce_keys`. TypeStruct
+  defines a public `t/0` type by default, and accepts `type/1`, `typep/1`, or
+  `opaque/1` to customize the generated type.
   """
 
-  # Elixir built-in types. Last updated for Elixir 1.4.2.
+  # Built-in types recognized by Elixir's typespec translator but not reported
+  # by `:erl_internal.is_type/2`.
+  # Last updated for Elixir 1.19.5.
   # See https://hexdocs.pm/elixir/typespecs.html.
-  # `:any` represents any arity (0..infinity).
-  @builtin_types [
-    any: 0,
-    none: 0,
-    atom: 0,
-    map: 0,
-    pid: 0,
-    port: 0,
-    reference: 0,
-    struct: 0,
-    tuple: 0,
-    float: 0,
-    integer: 0,
-    neg_integer: 0,
-    non_neg_integer: 0,
-    pos_integer: 0,
-    list: 1,
-    nonempty_list: 1,
-    maybe_improper_list: :any,
-    nonempty_improper_list: :any,
-    nonempty_maybe_improper_list: :any,
-    term: 0,
-    arity: 0,
+  @elixir_builtin_types [
     as_boolean: 1,
-    binary: 0,
-    bitstring: 0,
-    boolean: 0,
-    byte: 0,
-    char: 0,
+    char_list: 0,
     charlist: 0,
     fun: 0,
-    identifier: 0,
-    iodata: 0,
-    iolist: 0,
     keyword: 0,
     keyword: 1,
-    list: 0,
-    nonempty_list: 0,
-    maybe_improper_list: 0,
-    nonempty_maybe_improper_list: 0,
-    mfa: 0,
-    module: 0,
-    no_return: 0,
-    node: 0,
-    number: 0,
+    nonempty_charlist: 0,
     struct: 0,
-    timeout: 0
+    var: 0
   ]
 
   defmacro __using__(_opts) do
@@ -61,30 +56,64 @@ defmodule TypeStruct do
     end
   end
 
-  # Possible uses:
-  # - `defstruct x: integer, y: integer`
+  @doc ~S"""
+  Defines a struct and a matching `t/0` type in the current module.
+
+      defmodule Point do
+        use TypeStruct
+
+        defstruct x: integer, y: integer
+      end
+
+  Fields without defaults are added to `@enforce_keys`.
+  """
   defmacro defstruct(fields)
+
   defmacro defstruct(keywords),
     do: do_defstruct(keywords, default_type_definition())
 
-  # Possible uses:
-  # - `defstruct Point, x: integer, y: integer`
-  # - `defstruct type(t), x: integer, y: integer`
+  @doc ~S"""
+  Defines either a nested struct module or a struct with a custom type.
+
+      defmodule Geometry do
+        use TypeStruct
+
+        defstruct Point, x: integer, y: integer
+      end
+
+  The example above defines `Geometry.Point` and `Geometry.Point.t/0`.
+
+  If the first argument is a type declaration, the struct is defined in the
+  current module with that type:
+
+      defstruct opaque(t), id: integer
+      defstruct typep(fields), id: integer
+  """
   defmacro defstruct(alias_or_type_definition, fields)
+
   defmacro defstruct({:__aliases__, _meta, _args} = alias, keywords) do
-    do_defmodule_defstruct(alias, __CALLER__,
-                           keywords, default_type_definition())
+    do_defmodule_defstruct(alias, __CALLER__, keywords, default_type_definition())
   end
+
   defmacro defstruct(quoted_type, keywords) do
     do_defstruct(keywords, parse_quoted_type(quoted_type))
   end
 
-  # Possible uses:
-  # - `defstruct Point, type(t), x: integer, y: integer`
+  @doc ~S"""
+  Defines a nested struct module with a custom type declaration.
+
+      defmodule Accounts do
+        use TypeStruct
+
+        defstruct User, opaque(t), id: integer
+      end
+
+  The example above defines `Accounts.User` and `@opaque t()`.
+  """
   defmacro defstruct(alias, type_definition, fields)
+
   defmacro defstruct(alias, quoted_type, keywords) do
-    do_defmodule_defstruct(alias, __CALLER__,
-                           keywords, parse_quoted_type(quoted_type))
+    do_defmodule_defstruct(alias, __CALLER__, keywords, parse_quoted_type(quoted_type))
   end
 
   # Convenience function to keep the macro definitions tidy.
@@ -127,7 +156,7 @@ defmodule TypeStruct do
       for {key, {_, _, default}} <- model, do: {key, default}
 
     enforce_keys_args =
-      Enum.filter_map(model, &(&1 |> elem(1) |> elem(1)), &elem(&1, 0))
+      for {key, {_, true, _}} <- model, do: key
 
     quoted_type = create_quoted_type(type_definition, model)
 
@@ -143,6 +172,7 @@ defmodule TypeStruct do
   end
 
   defp maybe_map_module_to_types(model, false, _module), do: model
+
   defp maybe_map_module_to_types(model, true, module) do
     for {key, {type, required, default}} <- model do
       type = maybe_prepend_module(type, module)
@@ -157,13 +187,14 @@ defmodule TypeStruct do
   # is a quoted representation of the field's default
   # value.
   defp parse_keyword_list(keywords) do
-    Enum.map keywords, fn({key, value}) ->
+    Enum.map(keywords, fn {key, value} ->
       {key, parse_keyword_value(value)}
-    end
+    end)
   end
 
   defp parse_keyword_value({:\\, _meta, [type, default]}),
     do: {type, false, default}
+
   defp parse_keyword_value(type),
     do: {type, true, nil}
 
@@ -179,7 +210,7 @@ defmodule TypeStruct do
 
   defp create_quoted_type({type_attribute, quoted_type_name}, model) do
     type_alias_args =
-      Enum.map(model, fn({key, {type, _, _}}) -> {key, type} end)
+      Enum.map(model, fn {key, {type, _, _}} -> {key, type} end)
 
     quoted_struct_type =
       {:%, [], [{:__MODULE__, [], Elixir}, {:%{}, [], type_alias_args}]}
@@ -188,18 +219,22 @@ defmodule TypeStruct do
   end
 
   defp create_quoted_type(:type, quoted_name, quoted_struct_type),
-    do: quote do: @type unquote(quoted_name) :: unquote(quoted_struct_type)
+    do: quote(do: @type(unquote(quoted_name) :: unquote(quoted_struct_type)))
+
   defp create_quoted_type(:typep, quoted_name, quoted_struct_type),
-    do: quote do: @typep unquote(quoted_name) :: unquote(quoted_struct_type)
+    do: quote(do: @typep(unquote(quoted_name) :: unquote(quoted_struct_type)))
+
   defp create_quoted_type(:opaque, quoted_name, quoted_struct_type),
-    do: quote do: @opaque unquote(quoted_name) :: unquote(quoted_struct_type)
+    do: quote(do: @opaque(unquote(quoted_name) :: unquote(quoted_struct_type)))
 
   # Takes a `Macro.Env.aliases` list, aka
   # `[{alias, module]}`, and returns a quoted block
   # of `alias/2` calls.
   defp create_quoted_alias_block(aliases) do
     for {aliased, actual} <- aliases do
-      quote do: alias unquote(actual), as: unquote(aliased)
+      quote do
+        alias unquote(actual), as: unquote(aliased)
+      end
     end
   end
 
@@ -209,39 +244,47 @@ defmodule TypeStruct do
   defp maybe_prepend_module(list, module) when is_list(list) do
     Enum.map(list, &maybe_prepend_module(&1, module))
   end
+
   defp maybe_prepend_module({atom, meta, args}, module) when is_atom(atom) do
     with true <- possible_type_name?(atom),
          arity <- quoted_args_arity(args),
          false <- is_builtin?(atom, arity) do
       args = if args, do: maybe_prepend_module(args, module), else: []
       module_atom_parts = split_module_into_atoms(module)
-      {{:".", [], [{:__aliases__, [], module_atom_parts}, atom]}, [], args}
+      {{:., [], [{:__aliases__, [], module_atom_parts}, atom]}, [], args}
     else
       _ -> {atom, meta, maybe_prepend_module(args, module)}
     end
   end
+
   defp maybe_prepend_module({node, meta, args}, module) when is_tuple(node) do
-    {maybe_prepend_module(node, module), meta, args}
+    {maybe_prepend_module(node, module), meta, maybe_prepend_module(args, module)}
   end
+
+  defp maybe_prepend_module(tuple, module) when is_tuple(tuple) do
+    tuple
+    |> Tuple.to_list()
+    |> maybe_prepend_module(module)
+    |> List.to_tuple()
+  end
+
   defp maybe_prepend_module(value, _module) do
     value
   end
 
   defp possible_type_name?(atom) do
-    atom |> Atom.to_string |> String.match?(~r/^[a-z][a-zA-Z0-9_]*[?!]{0,1}$/)
+    atom |> Atom.to_string() |> String.match?(~r/^[a-z][a-zA-Z0-9_]*[?!]{0,1}$/)
   end
 
   defp quoted_args_arity(nil), do: 0
   defp quoted_args_arity(list), do: length(list)
 
   defp is_builtin?(atom, arity) do
-    Enum.any? @builtin_types, fn
-      {type, :any} -> type == atom
-      {type, type_arity} -> type == atom && type_arity == arity
-    end
+    :erl_internal.is_type(atom, arity) ||
+      Enum.member?(Keyword.get_values(@elixir_builtin_types, atom), arity)
   end
 
   # Converts `Foo.Bar` to `[:Foo, :Bar]` (for example).
   defp split_module_into_atoms(module),
-    do: module |> Module.split |> Enum.map(&String.to_atom/1)
+    do: module |> Module.split() |> Enum.map(&String.to_atom/1)
 end
